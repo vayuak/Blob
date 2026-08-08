@@ -19,6 +19,11 @@ public class ShieldHandshakeFilter extends OncePerRequestFilter {
 
         String incomingKey = request.getHeader("X-Ghost-Shield-Key");
 
+        // 🟢 FIXED: Strip the invisible YAML spacing!
+        if (incomingKey != null) {
+            incomingKey = incomingKey.trim();
+        }
+
         if (SHIELD_KEY.equals(incomingKey)) {
             filterChain.doFilter(request, response);
         } else {
