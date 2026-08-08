@@ -19,7 +19,6 @@ import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 @Configuration
-@Profile("prod") // 🟢 FIXED: This completely hides this file while you are coding locally
 public class RedisConfig {
 
     @Bean
