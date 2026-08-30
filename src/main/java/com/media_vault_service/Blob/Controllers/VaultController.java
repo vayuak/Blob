@@ -3,6 +3,7 @@ package com.media_vault_service.Blob.Controllers;
 import com.media_vault_service.Blob.Services.BlobStorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
@@ -11,16 +12,26 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.io.InputStream;
 import java.util.Map;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/vault")
 @RequiredArgsConstructor
 @Slf4j
 public class VaultController {
+    public String buildStreamUrl(UUID mediaId) {
+        if (mediaId == null) return null;
 
+        // Dynamically captures scheme, host, and port from the inbound request
+        return ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path("/api/vault/stream/")
+                .path(mediaId.toString())
+                .toUriString();
+    }
     private final BlobStorageService blobService;
     private static final long MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB threshold limit
 
@@ -109,4 +120,5 @@ public class VaultController {
         if (contentType.startsWith("video/")) return "VIDEO";
         return "LINK";
     }
+
 }
