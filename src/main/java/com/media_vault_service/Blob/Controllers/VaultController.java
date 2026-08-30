@@ -22,13 +22,17 @@ import java.util.Map;
 public class VaultController {
 
     private final BlobStorageService blobService;
-    private static final long MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // Strict 100MB threshold limit
+    private static final long MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB threshold limit
 
     @PostMapping("/upload")
     public ResponseEntity<?> uploadMedia(
             @RequestParam("file") MultipartFile file,
             @RequestParam("userId") String userId) {
         try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "EMPTY_FILE", "message", "Uploaded file cannot be empty."));
+            }
+
             if (file.getSize() > MAX_FILE_SIZE_BYTES) {
                 return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                         .body(Map.of("error", "SIZE_VIOLATION", "message", "Multi-media tracking payloads are strictly capped at 100MB max."));
@@ -43,40 +47,43 @@ public class VaultController {
             log.info("Vault executing encrypted write operations for user handle reference: {}", userId);
             String ghostPath = blobService.saveMedia(file, userId);
 
+            // 🟢 FIX: Return correct /api/vault/stream path
             return ResponseEntity.ok(Map.of(
-                    "mediaUrl", "/v1/vault/stream/" + ghostPath,
+                    "mediaId", ghostPath,
+                    "mediaUrl", "/api/vault/stream/" + ghostPath,
                     "mediaType", detectMediaType(contentType),
                     "status", "VAULTED"
             ));
         } catch (Exception e) {
+            log.error("Vault upload failed for user {}: {}", userId, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
 
-    // 🟢 FIX: Fully patched Media Stream Delivery
     @GetMapping("/stream/{mediaId}")
-    public ResponseEntity<Resource> streamMedia(@PathVariable String mediaId) throws Exception {
-        BlobStorageService.DecryptedPayload payload = blobService.getDecryptedPayload(mediaId);
+    public ResponseEntity<Resource> streamMedia(@PathVariable String mediaId) {
+        try {
+            BlobStorageService.DecryptedPayload payload = blobService.getDecryptedPayload(mediaId);
 
-        MediaType mediaType = MediaType.parseMediaType(
-                payload.contentType() != null ? payload.contentType() : "application/octet-stream"
-        );
+            if (payload == null || payload.stream() == null) {
+                return ResponseEntity.notFound().build();
+            }
 
-        InputStream inputStream = payload.stream();
-        long contentLength = inputStream.available();
+            MediaType mediaType = MediaType.parseMediaType(
+                    payload.contentType() != null ? payload.contentType() : "application/octet-stream"
+            );
 
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CACHE_CONTROL, "max-age=31536000")
-                .contentType(mediaType)
-                .contentLength(contentLength > 0 ? contentLength : -1)
-                .body(new InputStreamResource(inputStream));
-    }
+            InputStream inputStream = payload.stream();
 
-    private String detectMediaType(String contentType) {
-        if (contentType == null) return "TEXT";
-        if (contentType.startsWith("image/")) return "IMAGE";
-        if (contentType.startsWith("video/")) return "VIDEO";
-        return "LINK";
+            // 🟢 FIX: Omit explicit contentLength to let Spring chunk the stream safely
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CACHE_CONTROL, "max-age=31536000, private")
+                    .contentType(mediaType)
+                    .body(new InputStreamResource(inputStream));
+        } catch (Exception e) {
+            log.error("Streaming failed for media ID {}: {}", mediaId, e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        }
     }
 
     @DeleteMapping("/delete/{mediaId}")
@@ -91,8 +98,15 @@ public class VaultController {
                 return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "FILE_NOT_FOUND"));
             }
         } catch (Exception e) {
-            log.error("Vault deletion failed: {}", e.getMessage());
+            log.error("Vault deletion failed for media ID {}: {}", mediaId, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
+    }
+
+    private String detectMediaType(String contentType) {
+        if (contentType == null) return "TEXT";
+        if (contentType.startsWith("image/")) return "IMAGE";
+        if (contentType.startsWith("video/")) return "VIDEO";
+        return "LINK";
     }
 }
