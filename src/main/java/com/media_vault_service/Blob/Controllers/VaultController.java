@@ -12,38 +12,37 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.io.InputStream;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/vault")
 @RequiredArgsConstructor
 @Slf4j
 public class VaultController {
-    public String buildStreamUrl(UUID mediaId) {
-        if (mediaId == null) return null;
 
-        // Dynamically captures scheme, host, and port from the inbound request
-        return ServletUriComponentsBuilder.fromCurrentContextPath()
-                .path("/api/vault/stream/")
-                .path(mediaId.toString())
-                .toUriString();
-    }
     private final BlobStorageService blobService;
-    private static final long MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100MB threshold limit
+    private static final long MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // Strict 100MB threshold limit
+
+    // 🟢 FIX 1: Enforce absolute public domain for React Native
+    @Value("${blob.public.url:https://blob-production-d31a.up.railway.app}")
+    private String publicBlobUrl;
+
+    public String buildStreamUrl(String mediaId) {
+        if (mediaId == null) return null;
+        String baseUrl = publicBlobUrl.endsWith("/")
+                ? publicBlobUrl.substring(0, publicBlobUrl.length() - 1)
+                : publicBlobUrl;
+        return baseUrl + "/api/vault/stream/" + mediaId;
+    }
 
     @PostMapping("/upload")
     public ResponseEntity<?> uploadMedia(
             @RequestParam("file") MultipartFile file,
             @RequestParam("userId") String userId) {
         try {
-            if (file.isEmpty()) {
-                return ResponseEntity.badRequest().body(Map.of("error", "EMPTY_FILE", "message", "Uploaded file cannot be empty."));
-            }
-
             if (file.getSize() > MAX_FILE_SIZE_BYTES) {
                 return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                         .body(Map.of("error", "SIZE_VIOLATION", "message", "Multi-media tracking payloads are strictly capped at 100MB max."));
@@ -58,43 +57,41 @@ public class VaultController {
             log.info("Vault executing encrypted write operations for user handle reference: {}", userId);
             String ghostPath = blobService.saveMedia(file, userId);
 
-            // 🟢 FIX: Return correct /api/vault/stream path
-            return ResponseEntity.ok(Map.of(
-                    "mediaId", ghostPath,
-                    "mediaUrl", "/api/vault/stream/" + ghostPath,
-                    "mediaType", detectMediaType(contentType),
-                    "status", "VAULTED"
-            ));
+            // 🟢 FIX 2: Generate the unbreakable public HTTPS link
+            String absoluteStreamUrl = buildStreamUrl(ghostPath);
+
+            // 🟢 FIX 3: Return every single key the SocialController expects
+            Map<String, Object> response = new HashMap<>();
+            response.put("mediaId", ghostPath);
+            response.put("mediaUrl", absoluteStreamUrl);
+            response.put("mediaType", detectMediaType(contentType));
+            response.put("avatarUrl", absoluteStreamUrl);
+            response.put("profilePictureUrl", absoluteStreamUrl);
+            response.put("status", "VAULTED");
+
+            return ResponseEntity.ok(response);
+
         } catch (Exception e) {
-            log.error("Vault upload failed for user {}: {}", userId, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
 
     @GetMapping("/stream/{mediaId}")
-    public ResponseEntity<Resource> streamMedia(@PathVariable String mediaId) {
-        try {
-            BlobStorageService.DecryptedPayload payload = blobService.getDecryptedPayload(mediaId);
+    public ResponseEntity<Resource> streamMedia(@PathVariable String mediaId) throws Exception {
+        BlobStorageService.DecryptedPayload payload = blobService.getDecryptedPayload(mediaId);
 
-            if (payload == null || payload.stream() == null) {
-                return ResponseEntity.notFound().build();
-            }
+        MediaType mediaType = MediaType.parseMediaType(
+                payload.contentType() != null ? payload.contentType() : "application/octet-stream"
+        );
 
-            MediaType mediaType = MediaType.parseMediaType(
-                    payload.contentType() != null ? payload.contentType() : "application/octet-stream"
-            );
+        InputStream inputStream = payload.stream();
+        long contentLength = inputStream.available();
 
-            InputStream inputStream = payload.stream();
-
-            // 🟢 FIX: Omit explicit contentLength to let Spring chunk the stream safely
-            return ResponseEntity.ok()
-                    .header(HttpHeaders.CACHE_CONTROL, "max-age=31536000, private")
-                    .contentType(mediaType)
-                    .body(new InputStreamResource(inputStream));
-        } catch (Exception e) {
-            log.error("Streaming failed for media ID {}: {}", mediaId, e.getMessage());
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
-        }
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, "max-age=31536000")
+                .contentType(mediaType)
+                .contentLength(contentLength > 0 ? contentLength : -1)
+                .body(new InputStreamResource(inputStream));
     }
 
     @DeleteMapping("/delete/{mediaId}")
@@ -109,7 +106,7 @@ public class VaultController {
                 return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "FILE_NOT_FOUND"));
             }
         } catch (Exception e) {
-            log.error("Vault deletion failed for media ID {}: {}", mediaId, e.getMessage());
+            log.error("Vault deletion failed: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
         }
     }
@@ -120,5 +117,4 @@ public class VaultController {
         if (contentType.startsWith("video/")) return "VIDEO";
         return "LINK";
     }
-
 }
