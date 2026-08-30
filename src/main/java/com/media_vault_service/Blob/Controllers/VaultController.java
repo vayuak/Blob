@@ -57,19 +57,18 @@ public class VaultController {
             log.info("Vault executing encrypted write operations for user handle reference: {}", userId);
             String ghostPath = blobService.saveMedia(file, userId);
 
-            // 🟢 FIX 2: Generate the unbreakable public HTTPS link
-            String absoluteStreamUrl = buildStreamUrl(ghostPath);
+            // 🟢 The Gateway relies on relative paths
+            String relativePath = "/api/vault/stream/" + ghostPath;
 
-            // 🟢 FIX 3: Return every single key the SocialController expects
-            Map<String, Object> response = new HashMap<>();
-            response.put("mediaId", ghostPath);
-            response.put("mediaUrl", absoluteStreamUrl);
-            response.put("mediaType", detectMediaType(contentType));
-            response.put("avatarUrl", absoluteStreamUrl);
-            response.put("profilePictureUrl", absoluteStreamUrl);
-            response.put("status", "VAULTED");
-
-            return ResponseEntity.ok(response);
+            // Return relative paths, but ensure ALL keys exist!
+            return ResponseEntity.ok(Map.of(
+                    "mediaId", ghostPath,
+                    "mediaUrl", relativePath,
+                    "mediaType", detectMediaType(contentType),
+                    "avatarUrl", relativePath,
+                    "profilePictureUrl", relativePath,
+                    "status", "VAULTED"
+            ));
 
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
