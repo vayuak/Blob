@@ -5,32 +5,47 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
 
 @Component
 @Slf4j
 public class ShieldHandshakeFilter extends OncePerRequestFilter {
-    private static final String SHIELD_KEY = "PermanentSecret999";
+
+    @Value("${ghost.shield.key}")
+    private String shieldKey;
+
+    @Value("${ghost.gateway.secret}")
+    private String gatewaySecret;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
-            throws ServletException, java.io.IOException {
+            throws ServletException, IOException {
 
-        String incomingKey = request.getHeader("X-Ghost-Shield-Key");
-
-        // 🟢 FIXED: Strip the invisible YAML spacing!
-        if (incomingKey != null) {
-            incomingKey = incomingKey.trim();
+        // Capability URL pattern: Reading streams is public.
+        if (request.getMethod().equalsIgnoreCase("GET") && request.getRequestURI().startsWith("/api/vault/stream/")) {
+            filterChain.doFilter(request, response);
+            return;
         }
 
-        if (SHIELD_KEY.equals(incomingKey)) {
+        String incomingShield = request.getHeader("X-Ghost-Shield-Key");
+        String incomingGateway = request.getHeader("X-Gateway-Secret");
+
+        if (incomingShield != null) incomingShield = incomingShield.trim();
+        if (incomingGateway != null) incomingGateway = incomingGateway.trim();
+
+        boolean isValidShield = incomingShield != null && incomingShield.equals(shieldKey);
+        boolean isValidGateway = incomingGateway != null && incomingGateway.equals(gatewaySecret);
+
+        if (isValidShield || isValidGateway) {
             filterChain.doFilter(request, response);
         } else {
-            log.warn("INTRUSION ATTEMPT: Direct access to {} blocked from {}", request.getRequestURI(), request.getRemoteAddr());
+            log.warn("INTRUSION ATTEMPT: Access blocked for {}", request.getRequestURI());
             response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-            response.setContentType("text/plain");
-            response.getWriter().write("Ghost System: Access Denied. Use the Gateway.");
+            response.getWriter().write("Ghost System: Access Denied.");
         }
     }
 }

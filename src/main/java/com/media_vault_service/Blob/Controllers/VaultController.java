@@ -3,7 +3,6 @@ package com.media_vault_service.Blob.Controllers;
 import com.media_vault_service.Blob.Services.BlobStorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
@@ -14,7 +13,6 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
-import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -24,49 +22,39 @@ import java.util.Map;
 public class VaultController {
 
     private final BlobStorageService blobService;
-    private static final long MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // Strict 100MB threshold limit
 
-    // 🟢 FIX 1: Enforce absolute public domain for React Native
-    @Value("${blob.public.url:https://blob-production-d31a.up.railway.app}")
-    private String publicBlobUrl;
-
-    public String buildStreamUrl(String mediaId) {
-        if (mediaId == null) return null;
-        String baseUrl = publicBlobUrl.endsWith("/")
-                ? publicBlobUrl.substring(0, publicBlobUrl.length() - 1)
-                : publicBlobUrl;
-        return baseUrl + "/api/vault/stream/" + mediaId;
-    }
+    // 🟢 SECURE PRACTICE: Inject via environment variables (application.properties), fallback to 100MB
+    @org.springframework.beans.factory.annotation.Value("${vault.max.filesize:104857600}")
+    private long maxFileSizeBytes;
 
     @PostMapping("/upload")
     public ResponseEntity<?> uploadMedia(
             @RequestParam("file") MultipartFile file,
             @RequestParam("userId") String userId) {
         try {
-            if (file.getSize() > MAX_FILE_SIZE_BYTES) {
+            if (file.getSize() > maxFileSizeBytes) {
                 return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
-                        .body(Map.of("error", "SIZE_VIOLATION", "message", "Multi-media tracking payloads are strictly capped at 100MB max."));
+                        .body(Map.of("error", "SIZE_VIOLATION", "message", "Media payload exceeds size limit."));
             }
 
             String contentType = file.getContentType();
             if (contentType != null && contentType.startsWith("audio/")) {
                 return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                        .body(Map.of("error", "FORMAT_PROHIBITED", "message", "Audio channel recording uploads are prohibited on this node framework."));
+                        .body(Map.of("error", "FORMAT_PROHIBITED", "message", "Audio uploads are prohibited."));
             }
 
             log.info("Vault executing encrypted write operations for user handle reference: {}", userId);
             String ghostPath = blobService.saveMedia(file, userId);
 
-            // 🟢 The Gateway relies on relative paths
-            String relativePath = "/api/vault/stream/" + ghostPath;
+            // 🟢 CRITICAL ROUTING FIX: Store /v1/ path so your Gateway correctly intercepts it
+            String gatewayRelativePath = "/v1/vault/stream/" + ghostPath;
 
-            // Return relative paths, but ensure ALL keys exist!
             return ResponseEntity.ok(Map.of(
                     "mediaId", ghostPath,
-                    "mediaUrl", relativePath,
+                    "mediaUrl", gatewayRelativePath,
                     "mediaType", detectMediaType(contentType),
-                    "avatarUrl", relativePath,
-                    "profilePictureUrl", relativePath,
+                    "avatarUrl", gatewayRelativePath,
+                    "profilePictureUrl", gatewayRelativePath,
                     "status", "VAULTED"
             ));
 
