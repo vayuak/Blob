@@ -77,7 +77,7 @@ public class VaultController {
     @GetMapping("/stream/{mediaId}")
     public ResponseEntity<?> streamMedia(
             @PathVariable String mediaId,
-            @RequestHeader HttpHeaders headers) throws Exception {
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader) {
 
         BlobStorageService.DecryptedPayload payload;
         try {
@@ -93,42 +93,51 @@ public class VaultController {
         }
         MediaType mediaType = resolveType(rawType, mediaId);
 
-        // ✅ FIXED: We use payload.data() wrapped in ByteArrayResource
-        ByteArrayResource resource = new ByteArrayResource(payload.data()) {
-            @Override
-            public String getFilename() {
-                return mediaId + ".mp4";
+        byte[] data = payload.data();
+        long totalLength = data.length;
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(mediaType);
+        headers.set(HttpHeaders.ACCEPT_RANGES, "bytes");
+        headers.set(HttpHeaders.CACHE_CONTROL, "max-age=31536000");
+        headers.set(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + mediaId + ".mp4\"");
+
+        // 1. If no range is requested, return the whole file
+        if (rangeHeader == null || !rangeHeader.toLowerCase().startsWith("bytes=")) {
+            headers.setContentLength(totalLength);
+            return new ResponseEntity<>(new ByteArrayResource(data), headers, HttpStatus.OK);
+        }
+
+        // 2. If mobile player requests a chunk, slice the byte array manually
+        try {
+            String range = rangeHeader.substring(6).trim();
+            int dash = range.indexOf('-');
+            long start = Long.parseLong(range.substring(0, dash));
+            long end = range.length() > dash + 1 ? Long.parseLong(range.substring(dash + 1)) : totalLength - 1;
+
+            if (end >= totalLength) {
+                end = totalLength - 1;
             }
-        };
 
-        long contentLength = payload.data().length;
-        List<HttpRange> ranges = headers.getRange();
-
-        if (ranges != null && !ranges.isEmpty()) {
-            HttpRange range = ranges.get(0);
-            long start = range.getRangeStart(contentLength);
-            long end = range.getRangeEnd(contentLength);
+            // Cap the chunk size to our 2MB limit
             long rangeLength = Math.min(MAX_CHUNK_BYTES, end - start + 1);
+            end = start + rangeLength - 1;
 
-            ResourceRegion region = new ResourceRegion(resource, start, rangeLength);
+            // 🟢 FIX: Slice the array manually to bypass the missing ResourceRegion converter
+            byte[] chunk = new byte[(int) rangeLength];
+            System.arraycopy(data, (int) start, chunk, 0, (int) rangeLength);
 
-            return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
-                    .contentType(mediaType)
-                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + mediaId + ".mp4\"")
-                    .header(HttpHeaders.CACHE_CONTROL, "max-age=31536000")
-                    .body(region);
-        } else {
-            return ResponseEntity.ok()
-                    .contentType(mediaType)
-                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + mediaId + ".mp4\"")
-                    .header(HttpHeaders.CACHE_CONTROL, "max-age=31536000")
-                    .contentLength(contentLength)
-                    .body(resource);
+            headers.setContentLength(rangeLength);
+            headers.set(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + totalLength);
+
+            return new ResponseEntity<>(new ByteArrayResource(chunk), headers, HttpStatus.PARTIAL_CONTENT);
+
+        } catch (Exception e) {
+            // If the range is invalid, send a 416 so the player knows exactly how big the file is
+            headers.set(HttpHeaders.CONTENT_RANGE, "bytes */" + totalLength);
+            return new ResponseEntity<>(headers, HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE);
         }
     }
-
     @DeleteMapping("/delete/{mediaId}")
     public ResponseEntity<?> deleteMediaEndpoint(@PathVariable String mediaId) {
         try {
