@@ -25,8 +25,11 @@ public class ShieldHandshakeFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
 
-        // Capability URL pattern: Reading streams is public.
-        if (request.getMethod().equalsIgnoreCase("GET") && request.getRequestURI().startsWith("/api/vault/stream/")) {
+        String uri = request.getRequestURI();
+
+        // 🟢 FIX: Allow public access to stream endpoints for both /v1/ and /api/ prefixes
+        if (request.getMethod().equalsIgnoreCase("GET") &&
+                (uri.startsWith("/api/vault/stream/") || uri.startsWith("/v1/vault/stream/"))) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -43,7 +46,7 @@ public class ShieldHandshakeFilter extends OncePerRequestFilter {
         if (isValidShield || isValidGateway) {
             filterChain.doFilter(request, response);
         } else {
-            log.warn("INTRUSION ATTEMPT: Access blocked for {}", request.getRequestURI());
+            log.warn("INTRUSION ATTEMPT: Access blocked for {}", uri);
             response.setStatus(HttpServletResponse.SC_FORBIDDEN);
             response.getWriter().write("Ghost System: Access Denied.");
         }
