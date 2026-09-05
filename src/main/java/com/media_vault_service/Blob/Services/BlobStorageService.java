@@ -10,43 +10,49 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class BlobStorageService {
+
     private final RedisTemplate<String, Object> redisTemplate;
     private final MediaVaultRepository mediaVaultRepository;
 
     private static final String VAULT_CACHE_PREFIX = "vault:media:";
 
-    // CHANGED: Holds raw byte array to support HTTP Range requests for Video Streaming
+    // Fast in-memory cache to prevent re-querying DB and re-decrypting AES for every video chunk
+    private final Map<String, DecryptedPayload> streamCache = new ConcurrentHashMap<>();
+
     public record DecryptedPayload(byte[] data, String contentType) {}
 
     public boolean deleteMedia(String mediaId) {
-        log.info("  Executing database purge protocol for media payload: {}", mediaId);
+        log.info("Executing database purge protocol for media payload: {}", mediaId);
         boolean isDeleted = false;
+        streamCache.remove(mediaId);
         try {
             Boolean cacheDeleted = redisTemplate.delete(VAULT_CACHE_PREFIX + mediaId);
             if (Boolean.TRUE.equals(cacheDeleted)) {
-                log.info("  Vault Cache Wipe: Successfully eradicated from active memory array.");
+                log.info("Vault Cache Wipe: Successfully eradicated from active memory array.");
             }
 
             if (mediaVaultRepository.existsById(mediaId)) {
                 mediaVaultRepository.deleteById(mediaId);
-                log.info("  Vault DB Wipe: Successfully destroyed encrypted record from database.");
+                log.info("Vault DB Wipe: Successfully destroyed encrypted record from database.");
                 isDeleted = true;
             } else {
-                log.warn("  Vault DB Wipe: Target footprint not found in database.");
+                log.warn("Vault DB Wipe: Target footprint not found in database.");
                 if (Boolean.TRUE.equals(cacheDeleted)) {
                     isDeleted = true;
                 }
             }
         } catch (Exception e) {
-            log.error("  Vault Purge Failure: {}", e.getMessage(), e);
+            log.error("Vault Purge Failure: {}", e.getMessage(), e);
         }
         return isDeleted;
     }
@@ -65,7 +71,7 @@ public class BlobStorageService {
                 .build();
 
         mediaVaultRepository.save(vaultRecord);
-        log.info("  Vault DB Write: Encrypted payload permanently secured in database as {}", fileId);
+        log.info("Vault DB Write: Encrypted payload permanently secured in database as {}", fileId);
 
         try {
             if (redisTemplate != null && redisTemplate.getConnectionFactory() != null) {
@@ -74,14 +80,19 @@ public class BlobStorageService {
                 redisTemplate.expire(VAULT_CACHE_PREFIX + fileId, 12, TimeUnit.HOURS);
             }
         } catch (Exception e) {
-            log.warn("  Redis cache unavailable. Operating in DB-Only mode.");
+            log.warn("Redis cache unavailable. Operating in DB-Only mode.");
         }
         return fileId;
     }
 
     public DecryptedPayload getDecryptedPayload(String mediaId) throws Exception {
+        // Return immediately if the file is already decrypted in active streaming RAM
+        if (streamCache.containsKey(mediaId)) {
+            return streamCache.get(mediaId);
+        }
+
         byte[] encryptedData = null;
-        String contentType = "application/octet-stream";
+        String contentType = "video/mp4";
 
         try {
             if (redisTemplate != null && redisTemplate.getConnectionFactory() != null) {
@@ -112,7 +123,14 @@ public class BlobStorageService {
         }
 
         byte[] decryptedData = CryptoUtils.decrypt(encryptedData);
-        // CHANGED: Pass byte[] directly instead of InputStream
-        return new DecryptedPayload(decryptedData, contentType);
+        DecryptedPayload payload = new DecryptedPayload(decryptedData, contentType);
+
+        // Retain in RAM cache for streaming requests
+        if (streamCache.size() > 50) {
+            streamCache.clear(); // Evict old entries if memory usage grows
+        }
+        streamCache.put(mediaId, payload);
+
+        return payload;
     }
 }
