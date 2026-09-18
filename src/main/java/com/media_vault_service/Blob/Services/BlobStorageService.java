@@ -126,8 +126,10 @@ public class BlobStorageService {
         DecryptedPayload payload = new DecryptedPayload(decryptedData, contentType);
 
         // Retain in RAM cache for streaming requests
-        if (streamCache.size() > 50) {
-            streamCache.clear(); // Evict old entries if memory usage grows
+        // Simple bounded cache: Evicts the oldest entry instead of wiping all 50 entries
+        if (streamCache.size() >= 50 && !streamCache.containsKey(mediaId)) {
+            String oldestKey = streamCache.keySet().iterator().next();
+            streamCache.remove(oldestKey);
         }
         streamCache.put(mediaId, payload);
 
