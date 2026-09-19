@@ -8,6 +8,8 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.JdbcTypeCode;
+import java.sql.Types;
 
 @Entity
 @Table(name = "media_vault")
@@ -24,7 +26,8 @@ public class MediaVault {
     private String fileName;
     private String fileType;
 
-    // @Lob tells JPA to store this as a large binary object (bytea in Postgres)
+    // 🟢 CRITICAL FIX: Forces Postgres to use bytea instead of oid for binary files
     @Lob
+    @JdbcTypeCode(Types.BINARY)
     private byte[] encryptedData;
 }

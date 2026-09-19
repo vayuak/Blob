@@ -10,10 +10,8 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 @Service
@@ -26,21 +24,20 @@ public class BlobStorageService {
 
     private static final String VAULT_CACHE_PREFIX = "vault:media:";
 
-    // Fast in-memory cache to prevent re-querying DB and re-decrypting AES for every video chunk
-    private final Map<String, DecryptedPayload> streamCache = new ConcurrentHashMap<>();
-
     public record DecryptedPayload(byte[] data, String contentType) {}
 
     public boolean deleteMedia(String mediaId) {
         log.info("Executing database purge protocol for media payload: {}", mediaId);
         boolean isDeleted = false;
-        streamCache.remove(mediaId);
+
         try {
+            // 🟢 1. Wipe from External Redis
             Boolean cacheDeleted = redisTemplate.delete(VAULT_CACHE_PREFIX + mediaId);
             if (Boolean.TRUE.equals(cacheDeleted)) {
-                log.info("Vault Cache Wipe: Successfully eradicated from active memory array.");
+                log.info("Vault Cache Wipe: Successfully eradicated from external Redis array.");
             }
 
+            // 🟢 2. Wipe from PostgreSQL
             if (mediaVaultRepository.existsById(mediaId)) {
                 mediaVaultRepository.deleteById(mediaId);
                 log.info("Vault DB Wipe: Successfully destroyed encrypted record from database.");
@@ -74,6 +71,7 @@ public class BlobStorageService {
         log.info("Vault DB Write: Encrypted payload permanently secured in database as {}", fileId);
 
         try {
+            // 🟢 Write raw binary directly to Redis (No Jackson mapping)
             if (redisTemplate != null && redisTemplate.getConnectionFactory() != null) {
                 redisTemplate.opsForHash().put(VAULT_CACHE_PREFIX + fileId, "data", encryptedBytes);
                 redisTemplate.opsForHash().put(VAULT_CACHE_PREFIX + fileId, "type", file.getContentType());
@@ -86,31 +84,32 @@ public class BlobStorageService {
     }
 
     public DecryptedPayload getDecryptedPayload(String mediaId) throws Exception {
-        // Return immediately if the file is already decrypted in active streaming RAM
-        if (streamCache.containsKey(mediaId)) {
-            return streamCache.get(mediaId);
-        }
-
         byte[] encryptedData = null;
         String contentType = "video/mp4";
 
         try {
+            // 🟢 1. Attempt to fetch raw binary from External Redis
             if (redisTemplate != null && redisTemplate.getConnectionFactory() != null) {
                 Object cachedBytes = redisTemplate.opsForHash().get(VAULT_CACHE_PREFIX + mediaId, "data");
                 Object cachedType = redisTemplate.opsForHash().get(VAULT_CACHE_PREFIX + mediaId, "type");
                 if (cachedBytes instanceof byte[]) {
                     encryptedData = (byte[]) cachedBytes;
                     if (cachedType != null) contentType = cachedType.toString();
+                    log.info("Vault Cache Hit: Serving {} from external Redis.", mediaId);
                 }
             }
         } catch (Exception e) {}
 
+        // 🟢 2. Fallback to PostgreSQL if Redis cache misses
         if (encryptedData == null) {
             Optional<MediaVault> recordOptional = mediaVaultRepository.findById(mediaId);
             if (recordOptional.isPresent()) {
                 encryptedData = recordOptional.get().getEncryptedData();
                 contentType = recordOptional.get().getFileType();
+                log.info("Vault DB Hit: Fetched {} from PostgreSQL.", mediaId);
+
                 try {
+                    // Repopulate Redis cache for next request
                     if (redisTemplate != null && redisTemplate.getConnectionFactory() != null) {
                         redisTemplate.opsForHash().put(VAULT_CACHE_PREFIX + mediaId, "data", encryptedData);
                         redisTemplate.opsForHash().put(VAULT_CACHE_PREFIX + mediaId, "type", contentType);
@@ -122,17 +121,8 @@ public class BlobStorageService {
             }
         }
 
+        // 🟢 3. Decrypt and serve (Zero in-memory caching!)
         byte[] decryptedData = CryptoUtils.decrypt(encryptedData);
-        DecryptedPayload payload = new DecryptedPayload(decryptedData, contentType);
-
-        // Retain in RAM cache for streaming requests
-        // Simple bounded cache: Evicts the oldest entry instead of wiping all 50 entries
-        if (streamCache.size() >= 50 && !streamCache.containsKey(mediaId)) {
-            String oldestKey = streamCache.keySet().iterator().next();
-            streamCache.remove(oldestKey);
-        }
-        streamCache.put(mediaId, payload);
-
-        return payload;
+        return new DecryptedPayload(decryptedData, contentType);
     }
 }
