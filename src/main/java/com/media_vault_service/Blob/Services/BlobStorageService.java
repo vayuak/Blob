@@ -92,15 +92,22 @@ public class BlobStorageService {
             if (redisTemplate != null && redisTemplate.getConnectionFactory() != null) {
                 Object cachedBytes = redisTemplate.opsForHash().get(VAULT_CACHE_PREFIX + mediaId, "data");
                 Object cachedType = redisTemplate.opsForHash().get(VAULT_CACHE_PREFIX + mediaId, "type");
-                if (cachedBytes instanceof byte[]) {
-                    encryptedData = (byte[]) cachedBytes;
+
+                if (cachedBytes != null) {
+                    // 🟢 FIX: Jackson serializes byte[] to Base64 String. We must decode it.
+                    if (cachedBytes instanceof String) {
+                        encryptedData = java.util.Base64.getDecoder().decode((String) cachedBytes);
+                    } else if (cachedBytes instanceof byte[]) {
+                        encryptedData = (byte[]) cachedBytes;
+                    }
+
                     if (cachedType != null) contentType = cachedType.toString();
                     log.info("Vault Cache Hit: Serving {} from external Redis.", mediaId);
                 }
             }
-        } catch (Exception e) {}
-
-        // 🟢 2. Fallback to PostgreSQL if Redis cache misses
+        } catch (Exception e) {
+            log.warn("Redis cache unavailable. Operating in DB-Only mode.");
+        }
         if (encryptedData == null) {
             Optional<MediaVault> recordOptional = mediaVaultRepository.findById(mediaId);
             if (recordOptional.isPresent()) {
@@ -115,7 +122,9 @@ public class BlobStorageService {
                         redisTemplate.opsForHash().put(VAULT_CACHE_PREFIX + mediaId, "type", contentType);
                         redisTemplate.expire(VAULT_CACHE_PREFIX + mediaId, 12, TimeUnit.HOURS);
                     }
-                } catch (Exception e) {}
+                } catch (Exception e) {
+                    log.warn("Redis cache unavailable. Operating in DB-Only mode.");
+                }
             } else {
                 throw new AssetNotFoundException("Asset not found in database with ID: " + mediaId);
             }
